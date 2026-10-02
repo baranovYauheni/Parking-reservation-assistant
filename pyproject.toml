@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.scripts]
-parking-assistant = "parking_assistant:main"
+parking-assistant = "parking_assistant.__main__:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
