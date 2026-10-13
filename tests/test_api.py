@@ -6,6 +6,8 @@ from parking_assistant.container import build_container
 from parking_assistant.embeddings import HashingEmbeddings
 from parking_assistant.vectorstore import MemoryIndex
 
+ADMIN = {"Authorization": "Bearer test-admin-token"}
+
 
 @pytest.fixture
 def client(settings, clock):
@@ -45,11 +47,53 @@ def test_chat_answers_with_sources_and_sets_session_cookie(client):
     )
 
 
+def test_admin_endpoints_require_valid_token(client):
+    assert client.get("/api/admin/requests").status_code == 401
+    bad = {"Authorization": "Bearer nope"}
+    assert client.get("/api/admin/requests", headers=bad).status_code == 401
+    assert client.get("/api/admin/requests", headers=ADMIN).status_code == 200
+
+
 def test_other_session_cannot_see_request(client):
     rid = book(client)
     other = TestClient(client.app)
     assert other.get(f"/api/my-requests/{rid}").status_code == 404
     assert other.get("/api/my-requests").json()["requests"] == []
+
+
+def test_approve_flow_updates_user_status(client):
+    rid = book(client)
+    pending = client.get("/api/admin/requests?status=pending", headers=ADMIN).json()[
+        "requests"
+    ]
+    assert [r["id"] for r in pending] == [rid]
+    response = client.post(
+        f"/api/admin/requests/{rid}/decision", json={"action": "approve"}, headers=ADMIN
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
+    mine = client.get(f"/api/my-requests/{rid}").json()
+    assert mine["status_text"].startswith("approved")
+
+
+def test_reject_then_approve_conflicts(client):
+    rid = book(client)
+    assert (
+        client.post(
+            f"/api/admin/requests/{rid}/decision",
+            json={"action": "reject"},
+            headers=ADMIN,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/admin/requests/{rid}/decision",
+            json={"action": "approve"},
+            headers=ADMIN,
+        ).status_code
+        == 409
+    )
 
 
 def test_availability_endpoint_validates_period(client):
@@ -64,3 +108,15 @@ def test_availability_endpoint_validates_period(client):
         params={"start": "2026-10-20 12:00", "end": "2026-10-20 10:00"},
     )
     assert bad.status_code == 422
+
+
+def test_unknown_request_id_returns_404(client):
+    assert (
+        client.post(
+            "/api/admin/requests/" + "0" * 32 + "/decision",
+            json={"action": "approve"},
+            headers=ADMIN,
+        ).status_code
+        == 404
+    )
+    assert client.get("/api/admin/requests/not-an-id", headers=ADMIN).status_code == 404

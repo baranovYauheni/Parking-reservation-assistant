@@ -39,6 +39,7 @@ def settings(tmp_path: Path) -> Settings:
         VECTOR_BACKEND="memory",
         EMBEDDINGS_PROVIDER="hashing",
         LLM_ENABLED=False,
+        ADMIN_TOKEN="test-admin-token",
         _env_file=None,
     )
 

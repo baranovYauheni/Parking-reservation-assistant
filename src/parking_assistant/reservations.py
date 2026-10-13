@@ -14,7 +14,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from parking_assistant.availability import free_spaces
+from parking_assistant.availability import free_spaces, peak_occupancy
 from parking_assistant.car_number import is_valid_car_number, normalize_car_number
 from parking_assistant.db import Database
 from parking_assistant.timeutils import from_utc_text, to_utc_text, utc_now
@@ -320,6 +320,79 @@ class ReservationService:
                 "SELECT * FROM reservations WHERE id = ?", (reservation_id,)
             ).fetchone()
         return Reservation.from_row(row)
+
+    def mark_queued(self, reservation_id: str) -> Reservation:
+        self.get(reservation_id)
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE reservations SET queued_at = COALESCE(queued_at, ?) "
+                "WHERE id = ?",
+                (to_utc_text(self.clock()), reservation_id),
+            )
+        return self.get(reservation_id)
+
+    def approve(self, reservation_id: str, admin: str) -> Reservation:
+        """Human approval: re-check rules and allocate capacity atomically.
+
+        Repeating an approval returns the already-approved reservation.
+        """
+        self.get(reservation_id)
+        now = self.clock()
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM reservations WHERE id = ?", (reservation_id,)
+            ).fetchone()
+            current = Reservation.from_row(row)
+            if current.status is Status.APPROVED:
+                return current
+            if current.status is Status.REJECTED:
+                raise ConflictError("The request was already rejected.")
+            if current.start <= now:
+                raise ConflictError("The reservation start is no longer in the future.")
+
+            total = self._total_spaces(conn)
+            intervals = self.approved_intervals(conn, current.start, current.end)
+            if peak_occupancy(intervals, (current.start, current.end)) >= total:
+                raise ConflictError("No free space remains for this period.")
+            if self._car_overlap(
+                conn, current.car_number_norm, current, current.id, False
+            ):
+                raise ConflictError(
+                    "This car already has an approved overlapping reservation."
+                )
+
+            conn.execute(
+                "UPDATE reservations SET status = 'approved', decided_at = ?, "
+                "decided_by = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (to_utc_text(now), admin, reservation_id),
+            )
+        return self.get(reservation_id)
+
+    def reject(self, reservation_id: str, admin: str, reason: str = "") -> Reservation:
+        self.get(reservation_id)
+        now = self.clock()
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM reservations WHERE id = ?", (reservation_id,)
+            ).fetchone()
+            status = Status(row["status"])
+            if status is Status.APPROVED:
+                raise ConflictError("The request was already approved.")
+            if status is Status.PENDING:
+                conn.execute(
+                    "UPDATE reservations SET status = 'rejected', decided_at = ?, "
+                    "decided_by = ?, decision_reason = ? WHERE id = ?",
+                    (to_utc_text(now), admin, reason[:200], reservation_id),
+                )
+        return self.get(reservation_id)
+
+    def set_notification(self, reservation_id: str, text: str) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE reservations SET notification = ? WHERE id = ?",
+                (text[:500], reservation_id),
+            )
 
     # ---- helpers -----------------------------------------------------------
 

@@ -1,3 +1,4 @@
+import threading
 from datetime import timedelta
 
 import pytest
@@ -8,6 +9,7 @@ from parking_assistant.reservations import (
     NotFoundError,
     ReservationError,
     ReservationRequest,
+    ReservationService,
     Status,
     estimate_price,
 )
@@ -53,6 +55,60 @@ def test_same_car_cannot_have_overlapping_active_requests(service, clock):
         service.submit("s2", make_request(clock, car="ab123cd", start_h=25, hours=3))
     # Back-to-back is fine because intervals are half-open.
     service.submit("s2", make_request(clock, car="ab123cd", start_h=27, hours=1))
+
+
+def test_pending_requests_do_not_consume_capacity(service, db, clock):
+    db.set_setting("total_spaces", "1")
+    a = service.submit("s1", make_request(clock, car="CAR0001"))
+    b = service.submit("s2", make_request(clock, car="CAR0002"))
+    start, end = a.start, a.end
+    assert service.free_spaces(start, end) == 1
+    service.approve(a.id, "admin")
+    assert service.free_spaces(start, end) == 0
+    with pytest.raises(ConflictError, match="No free space"):
+        service.approve(b.id, "admin")
+    assert service.get(b.id).status is Status.PENDING
+
+
+def test_repeated_approval_is_idempotent_and_conflicting_decision_fails(service, clock):
+    r = service.submit("s", make_request(clock))
+    first = service.approve(r.id, "admin")
+    again = service.approve(r.id, "admin")
+    assert first.decided_at == again.decided_at
+    with pytest.raises(ConflictError):
+        service.reject(r.id, "admin")
+
+
+def test_approval_rechecks_that_start_is_still_in_future(service, clock):
+    r = service.submit("s", make_request(clock, start_h=1))
+    clock.advance(hours=2)
+    with pytest.raises(ConflictError, match="future"):
+        service.approve(r.id, "admin")
+
+
+def test_concurrent_approvals_never_overbook(db, clock):
+    db.set_setting("total_spaces", "3")
+    service = ReservationService(db, clock=clock)
+    ids = [
+        service.submit(f"s{i}", make_request(clock, car=f"CAR{i:04d}")).id
+        for i in range(8)
+    ]
+    results: list[str] = []
+
+    def approve(rid: str) -> None:
+        try:
+            service.approve(rid, "admin")
+            results.append("ok")
+        except ConflictError:
+            results.append("conflict")
+
+    threads = [threading.Thread(target=approve, args=(rid,)) for rid in ids]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count("ok") == 3
+    assert len(service.list_all(Status.APPROVED)) == 3
 
 
 def test_other_session_cannot_read_request(service, clock):

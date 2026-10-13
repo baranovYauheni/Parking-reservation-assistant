@@ -1,5 +1,6 @@
-"""FastAPI application: visitor chat API and HTML page."""
+"""FastAPI application: visitor chat, admin approval API and HTML pages."""
 
+import hmac
 import logging
 import re
 import secrets
@@ -7,17 +8,19 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from parking_assistant.config import Settings
 from parking_assistant.container import Container, build_container
 from parking_assistant.reservations import (
+    ConflictError,
     NotFoundError,
     Reservation,
+    Status,
     describe_status,
 )
 from parking_assistant.timeutils import (
@@ -37,6 +40,11 @@ class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
 
 
+class DecisionIn(BaseModel):
+    action: Literal["approve", "reject"]
+    reason: str = Field(default="", max_length=200)
+
+
 def public_view(r: Reservation) -> dict:
     """What the owner of a request may see."""
     return {
@@ -47,7 +55,23 @@ def public_view(r: Reservation) -> dict:
         "end": local_iso(r.end),
         "status": r.status.value,
         "status_text": describe_status(r),
+        "notification": r.notification,
     }
+
+
+def admin_view(r: Reservation, free_spaces: int | None = None) -> dict:
+    data = public_view(r) | {
+        "created_at": local_iso(r.created_at),
+        "queued_at": local_iso(r.queued_at) if r.queued_at else None,
+        "decided_at": local_iso(r.decided_at) if r.decided_at else None,
+        "decided_by": r.decided_by,
+        "decision_reason": r.decision_reason,
+        "export_error": r.export_error,
+        "recorded_at": local_iso(r.recorded_at) if r.recorded_at else None,
+    }
+    if free_spaces is not None:
+        data["free_spaces_for_period"] = free_spaces
+    return data
 
 
 def create_app(
@@ -59,8 +83,17 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        token_was_configured = settings.admin_token is not None
         container = factory(settings)
         app.state.container = container
+        if not token_was_configured:
+            logger.warning(
+                "ADMIN_TOKEN not set; generated admin token for this run: %s",
+                settings.admin_token.get_secret_value(),
+            )
+        resumed = container.workflow.recover()
+        if resumed:
+            logger.info("resumed %d workflow(s) after restart", len(resumed))
         yield
         container.close()
 
@@ -82,14 +115,38 @@ def create_app(
             )
         return session_id
 
+    def require_admin(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> str:
+        expected = (
+            settings.admin_token.get_secret_value() if settings.admin_token else ""
+        )
+        scheme, _, token = (authorization or "").partition(" ")
+        if (
+            not expected
+            or scheme.lower() != "bearer"
+            or not hmac.compare_digest(token.encode(), expected.encode())
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Administrator authentication required.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return "admin"
+
     ContainerDep = Annotated[Container, Depends(get_container)]
     SessionDep = Annotated[str, Depends(get_session)]
+    AdminDep = Annotated[str, Depends(require_admin)]
 
     # ---- pages -----------------------------------------------------------------
 
     @app.get("/", include_in_schema=False)
     def chat_page() -> FileResponse:
         return FileResponse(STATIC_DIR / "chat.html")
+
+    @app.get("/admin", include_in_schema=False)
+    def admin_page() -> FileResponse:
+        return FileResponse(STATIC_DIR / "admin.html")
 
     @app.get("/health")
     def health() -> dict:
@@ -160,5 +217,43 @@ def create_app(
             return public_view(c.service.get_for_session(reservation_id, session_id))
         except NotFoundError as exc:
             raise HTTPException(404, "Request not found.") from exc
+
+    # ---- admin API -------------------------------------------------------------
+
+    @app.get("/api/admin/requests")
+    def admin_list(c: ContainerDep, _: AdminDep, status: Status | None = None) -> dict:
+        items = []
+        for r in c.service.list_all(status):
+            free = (
+                c.service.free_spaces(r.start, r.end)
+                if r.status is Status.PENDING
+                else None
+            )
+            items.append(admin_view(r, free))
+        return {"requests": items}
+
+    @app.get("/api/admin/requests/{reservation_id}")
+    def admin_get(reservation_id: str, c: ContainerDep, _: AdminDep) -> dict:
+        try:
+            r = c.service.get(reservation_id)
+        except NotFoundError as exc:
+            raise HTTPException(404, "Request not found.") from exc
+        return admin_view(r, c.service.free_spaces(r.start, r.end)) | {
+            "workflow_waiting_for": c.workflow.waiting_for(reservation_id)
+        }
+
+    @app.post("/api/admin/requests/{reservation_id}/decision")
+    def admin_decide(
+        reservation_id: str, body: DecisionIn, c: ContainerDep, admin: AdminDep
+    ) -> dict:
+        try:
+            outcome = c.workflow.decide(reservation_id, body.action, admin, body.reason)
+        except NotFoundError as exc:
+            raise HTTPException(404, "Request not found.") from exc
+        except ConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if outcome.error:
+            raise HTTPException(409, outcome.error)
+        return admin_view(outcome.reservation)
 
     return app

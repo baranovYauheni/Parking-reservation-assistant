@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parking Admin</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1d2330; --muted:#6b7280; --line:#e3e6eb;
+          --accent:#2457d6; --ok:#16794c; --warn:#a35b00; --bad:#b42318; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:14px 20px; background:var(--card); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0 auto 0 0; }
+  main { max-width:1200px; margin:0 auto; padding:16px; display:flex; flex-direction:column; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; overflow-x:auto; }
+  input, select { padding:8px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; }
+  button { padding:7px 12px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.ok { background:var(--ok); } button.bad { background:var(--bad); } button.ghost { background:#fff; color:var(--accent); border:1px solid var(--line); }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:12px; color:var(--muted); font-weight:600; }
+  .badge { display:inline-block; font-size:12px; padding:1px 8px; border-radius:999px; color:#fff; }
+  .pending { background:var(--warn); } .approved { background:var(--accent); } .rejected { background:var(--bad); } .recorded { background:var(--ok); } .failed { background:var(--bad); }
+  .muted { color:var(--muted); }
+  #msg { min-height:20px; }
+  pre { margin:0; white-space:pre-wrap; font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Administrator · reservation approvals</h1>
+  <input type="password" id="token" placeholder="Admin token" autocomplete="off">
+  <button id="save">Sign in</button>
+  <select id="filter">
+    <option value="pending">Pending</option>
+    <option value="">All</option>
+    <option value="approved">Approved</option>
+    <option value="rejected">Rejected</option>
+  </select>
+</header>
+<main>
+  <div id="msg" class="muted"></div>
+  <section class="card">
+    <table>
+      <thead><tr><th>Request</th><th>Name</th><th>Car</th><th>Period</th><th>Free</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="7" class="muted">Sign in to see requests.</td></tr></tbody>
+    </table>
+  </section>
+</main>
+<script>
+const tokenInput = document.getElementById('token');
+const msg = document.getElementById('msg');
+let token = '';
+try { token = sessionStorage.getItem('adminToken') || ''; } catch (e) {}
+tokenInput.value = token;
+
+async function api(path, options) {
+  const opts = Object.assign({}, options || {});
+  opts.headers = Object.assign({'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}, opts.headers || {});
+  const res = await fetch(path, opts);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || res.statusText);
+  return body;
+}
+
+function cell(text, cls) { const td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; return td; }
+function fmt(iso) { return iso ? iso.replace('T', ' ').slice(0, 16) : ''; }
+
+async function decide(id, action) {
+  let reason = '';
+  if (action === 'reject') { reason = prompt('Reason for rejection (optional):') || ''; }
+  try {
+    await api(`/api/admin/requests/${id}/decision`, {method: 'POST', body: JSON.stringify({action, reason})});
+    msg.textContent = `Request #${id.slice(0, 8)}: ${action}d.`;
+  } catch (e) { msg.textContent = `Request #${id.slice(0, 8)}: ${e.message}`; }
+  load();
+}
+
+async function load() {
+  if (!token) return;
+  const status = document.getElementById('filter').value;
+  try {
+    const data = await api('/api/admin/requests' + (status ? `?status=${status}` : ''));
+    const rows = document.getElementById('rows');
+    rows.replaceChildren();
+    if (!data.requests.length) { const tr = document.createElement('tr'); tr.append(cell('No requests.', 'muted')); rows.append(tr); }
+    for (const r of data.requests.slice().reverse()) {
+      const tr = document.createElement('tr');
+      tr.append(cell('#' + r.id.slice(0, 8) + '\n' + fmt(r.created_at)), cell(r.name), cell(r.car_number),
+                cell(fmt(r.start) + ' → ' + fmt(r.end)), cell(r.free_spaces_for_period ?? '—'));
+      const st = document.createElement('td');
+      const b = document.createElement('span'); b.className = 'badge ' + r.status; b.textContent = r.status; st.append(b);
+      const act = document.createElement('td');
+      if (r.status === 'pending') {
+        const a = document.createElement('button'); a.className = 'ok'; a.textContent = 'Approve'; a.onclick = () => decide(r.id, 'approve');
+        const j = document.createElement('button'); j.className = 'bad'; j.textContent = 'Reject'; j.style.marginLeft = '6px'; j.onclick = () => decide(r.id, 'reject');
+        act.append(a, j);
+      }
+      tr.append(st, act);
+      rows.append(tr);
+    }
+  } catch (e) { msg.textContent = e.message; }
+}
+
+document.getElementById('save').onclick = () => {
+  token = tokenInput.value.trim();
+  try { sessionStorage.setItem('adminToken', token); } catch (e) {}
+  msg.textContent = ''; load();
+};
+document.getElementById('filter').onchange = load;
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

@@ -15,3 +15,12 @@ def test_llm_is_available_only_with_key_and_enabled(tmp_path):
     assert not make(tmp_path).llm_available
     assert make(tmp_path, OPENAI_API_KEY="sk-test").llm_available
     assert not make(tmp_path, OPENAI_API_KEY="sk-test", LLM_ENABLED=False).llm_available
+
+
+def test_ensure_secrets_generates_admin_token_only_when_missing(tmp_path):
+    generated = make(tmp_path)
+    generated.ensure_secrets()
+    assert len(generated.admin_token.get_secret_value()) >= 24
+    configured = make(tmp_path, ADMIN_TOKEN="fixed")
+    configured.ensure_secrets()
+    assert configured.admin_token.get_secret_value() == "fixed"
