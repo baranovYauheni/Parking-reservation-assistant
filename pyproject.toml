@@ -1,0 +1,48 @@
+[project]
+name = "parking-assistant"
+version = "0.1.0"
+description = "Parking reservation chatbot: RAG, human-in-the-loop approval, MCP export and LangGraph orchestration"
+readme = "README.md"
+authors = [
+    { name = "Yauheni Baranau", email = "baranov.yauheni@icloud.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "fastembed>=0.9.0",
+    "httpx>=0.28.1",
+    "langchain>=1.0",
+    "langchain-core>=1.6.10",
+    "langchain-openai>=1.7.1",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.15.0",
+    "uvicorn[standard]>=0.54.0",
+    "weaviate-client>=4.9",
+]
+
+[project.scripts]
+parking-assistant = "parking_assistant.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs external services (Weaviate)"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = ["drills"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
