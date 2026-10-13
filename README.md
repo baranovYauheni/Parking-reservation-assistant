@@ -1,6 +1,6 @@
 # Parking Reservation Assistant
 
-A chatbot for a fictional parking garage (**Demo Central Parking**: 10 interchangeable spaces, open 24/7, GEL 5 per started hour, timezone `Asia/Tbilisi`). It answers questions with **RAG** (Weaviate + LangChain), reads live prices, hours and availability from **SQL**, collects reservation details in a multi-turn dialog with **guardrails** against prompt injection and data leaks, escalates each confirmed request to a **human administrator** through a second LangChain agent and an authenticated REST API, and records approved reservations to a file through an **MCP server**.
+A chatbot for a fictional parking garage (**Demo Central Parking**: 10 interchangeable spaces, open 24/7, GEL 5 per started hour, timezone `Asia/Tbilisi`). It answers questions with **RAG** (Weaviate + LangChain), reads live prices, hours and availability from **SQL**, collects reservation details in a multi-turn dialog with **guardrails** against prompt injection and data leaks, escalates each confirmed request to a **human administrator** through a second LangChain agent and an authenticated REST API, records approved reservations to a file through an **MCP server**, and orchestrates the whole pipeline with **LangGraph** (persistent state, pause/resume for the human decision, crash recovery).
 
 All data is synthetic.
 
@@ -11,7 +11,7 @@ All data is synthetic.
 | 1 | RAG chatbot, Weaviate vector DB, SQL dynamic data, reservation dialog, guardrails, evaluation | `stage-1` | done |
 | 2 | Second LangChain agent, human-in-the-loop approval via admin REST API | `stage-2` | done |
 | 3 | MCP server records approved reservations (`Name \| Car Number \| Reservation Period \| Approval Time`) | `stage-3` | done |
-| 4 | LangGraph orchestration of the full pipeline, integration and load tests | `stage-4` | next |
+| 4 | LangGraph orchestration of the full pipeline, integration and load tests | `stage-4` | done |
 
 ## Architecture
 
@@ -19,14 +19,14 @@ All data is synthetic.
 flowchart LR
   U[Visitor browser<br/>chat.html] -->|POST /api/chat<br/>session cookie| API[FastAPI]
   A[Administrator<br/>admin.html] -->|Bearer token<br/>/api/admin/*| API
-  API --> CG[Chat agent]
+  API --> CG[LangGraph chat graph]
   CG -->|guard| G[Guardrails]
   CG -->|info| RAG[RAG answerer]
   RAG --> W[(Weaviate<br/>public docs)]
   RAG --> SQL[(SQLite<br/>prices, hours,<br/>reservations)]
   RAG -.optional.-> LLM[OpenAI chat model]
   CG -->|booking dialog / submit| SQL
-  CG -->|submitted request| WF[Approval service]
+  CG -->|submitted request| WF[LangGraph reservation workflow]
   WF -->|escalate / notify| AG[Admin agent<br/>LangChain create_agent]
   AG -->|tools: enqueue, read status| SQL
   API -->|human decision| WF
@@ -36,11 +36,13 @@ flowchart LR
   MS -->|atomic snapshot| F[(var/exports/reservations.txt)]
 ```
 
+Detailed design, graphs and security model: [docs/architecture.md](docs/architecture.md).
+
 ### How it works
 
 1. **Information.** Every message is screened by guardrails (prompt injection, requests for other people's data). The RAG answerer retrieves the top-K public chunks from Weaviate and reads live prices, opening hours and free spaces from SQL. With an OpenAI key the LLM writes the answer with `[doc_id]` citations; without a key an extractive answer is returned. Sources are shown in the UI.
 2. **Booking.** "I want to book" starts a slot-filling dialog (first name, last name, car number, start, end). Fields can be given one by one or together (`name: John Smith, car: AB123CD`, `from 2026-10-20 10:00 to 2026-10-20 12:00`), are kept between turns, can be edited (`edit car number`) and are validated. A summary with price and availability is shown before `confirm`.
-3. **Escalation.** On `confirm` a `pending` request is stored and the admin agent calls its `enqueue_for_human_review` tool. Pending requests do not hold a space.
+3. **Escalation.** On `confirm` a `pending` request is stored and the admin agent calls its `enqueue_for_human_review` tool while the workflow pauses at `interrupt()`. Pending requests do not hold a space.
 4. **Human decision.** The administrator approves or rejects in `/admin` (or via the REST API). Approval re-checks the rules and allocates capacity in one `BEGIN IMMEDIATE` SQLite transaction (peak occupancy over half-open intervals). The LLM has no tool that can approve.
 5. **Recording.** The MCP tool `record_reservation(reservation_id, auth_token)` verifies the secret, re-reads the reservation from SQL, refuses anything not approved, rewrites the export file atomically and marks it recorded. If recording fails, the request stays *approved - recording failed* and can be retried; the visitor sees "confirmed" only after recording succeeded.
 6. **Notification.** The admin agent reads the status through a tool and writes the visitor message.
@@ -126,23 +128,24 @@ uv run ruff check src tests scripts
 uv run ruff format --check src tests scripts
 ```
 
-Every functional module has at least two tests including real MCP stdio round-trips. CI (`.github/workflows/ci.yml`) runs lint, tests, Weaviate integration tests and a Docker build.
+Every functional module has at least two tests including real MCP stdio round-trips and LangGraph pause/resume and restart. CI (`.github/workflows/ci.yml`) runs lint, tests, Weaviate integration tests and a Docker build.
 
 ## Evaluation
 
 ```bash
 uv run python scripts/evaluate_rag.py      # uses .env settings (FastEmbed + Weaviate, LLM if key set)
+uv run python scripts/load_test.py --sessions 20
 ```
 
 * `docs/evaluation/rag-report.md` - 28 labeled questions (public, SQL, unknown, adversarial): Recall@3, Precision@3, MRR, answer correctness, source support, guardrail results, p50/p95 latency.
+* `docs/evaluation/load-report.md` - concurrent chat sessions, concurrent approvals competing for the last spaces, repeated MCP recording; integrity checks (no overbooking, no duplicate export lines).
 
 ## Project structure
 
 ```text
 src/parking_assistant/
   api.py                          FastAPI app: chat API, admin API, pages
-  chat.py                         chat agent: guard, route, info, booking, status; state in SQLite
-  approval.py                     human-in-the-loop approval flow
+  graphs.py                       LangGraph chat graph + reservation workflow
   admin_agent.py                  second agent (LangChain create_agent) with bounded tools
   booking_dialog.py               slot-filling dialog (collect, edit, confirm)
   rag.py                          retrieval + live SQL facts + generation with citations
@@ -161,9 +164,9 @@ src/parking_assistant/
   static/                         chat.html, admin.html
 data/knowledge/      public documents indexed in the vector store
 data/eval/           labeled evaluation questions
-scripts/             evaluation
+scripts/             evaluation and load test
 tests/               pytest suite
-docs/                evaluation reports
+docs/                architecture, evaluation reports
 ```
 
 ## Security and privacy

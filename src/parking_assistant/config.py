@@ -60,6 +60,10 @@ class Settings(BaseSettings):
         return self.data_dir / "parking.db"
 
     @property
+    def checkpoint_path(self) -> Path:
+        return self.data_dir / "checkpoints.db"
+
+    @property
     def export_path(self) -> Path:
         return self.data_dir / "exports" / "reservations.txt"
 

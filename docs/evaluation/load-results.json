@@ -1,0 +1,49 @@
+{
+  "run_at": "2026-10-13T11:32:26+00:00",
+  "config": {
+    "sessions": 20,
+    "chat_workers": 8,
+    "admin_workers": 4,
+    "vector_backend": "memory",
+    "embeddings": "hashing",
+    "llm": "offline"
+  },
+  "chat": {
+    "n": 140,
+    "p50": 93.6,
+    "p95": 242.5,
+    "max": 267.1,
+    "errors": 0,
+    "wall_s": 2.04,
+    "throughput_msg_s": 68.6
+  },
+  "admin_decisions": {
+    "n": 20,
+    "p50": 523.1,
+    "p95": 1793.7,
+    "max": 1808.5,
+    "status_codes": {
+      "200": 10,
+      "409": 10
+    },
+    "wall_s": 4.3
+  },
+  "mcp_record": {
+    "n": 20,
+    "p50": 1678.3,
+    "p95": 1786.5,
+    "max": 1793.9,
+    "failures": 0,
+    "wall_s": 8.33
+  },
+  "integrity": {
+    "submitted_requests": 20,
+    "capacity": 10,
+    "approved": 10,
+    "no_overbooking": true,
+    "export_lines": 10,
+    "export_matches_approved": true,
+    "no_duplicate_lines": true,
+    "all_recorded": true
+  }
+}
