@@ -46,6 +46,10 @@
       <tbody id="rows"><tr><td colspan="7" class="muted">Sign in to see requests.</td></tr></tbody>
     </table>
   </section>
+  <section class="card">
+    <strong>Export file</strong> <span class="muted">(Name | Car Number | Reservation Period | Approval Time)</span>
+    <pre id="export" class="muted">—</pre>
+  </section>
 </main>
 <script>
 const tokenInput = document.getElementById('token');
@@ -76,6 +80,12 @@ async function decide(id, action) {
   load();
 }
 
+async function retry(id) {
+  try { await api(`/api/admin/requests/${id}/retry-export`, {method: 'POST'}); msg.textContent = `Export retried for #${id.slice(0, 8)}.`; }
+  catch (e) { msg.textContent = e.message; }
+  load();
+}
+
 async function load() {
   if (!token) return;
   const status = document.getElementById('filter').value;
@@ -90,15 +100,21 @@ async function load() {
                 cell(fmt(r.start) + ' → ' + fmt(r.end)), cell(r.free_spaces_for_period ?? '—'));
       const st = document.createElement('td');
       const b = document.createElement('span'); b.className = 'badge ' + r.status; b.textContent = r.status; st.append(b);
+      if (r.status === 'approved') { const e = document.createElement('span'); e.className = 'badge ' + r.export_status; e.style.marginLeft = '4px'; e.textContent = r.export_status; st.append(e); }
+      if (r.export_error) { const d = document.createElement('div'); d.className = 'muted'; d.textContent = r.export_error; st.append(d); }
       const act = document.createElement('td');
       if (r.status === 'pending') {
         const a = document.createElement('button'); a.className = 'ok'; a.textContent = 'Approve'; a.onclick = () => decide(r.id, 'approve');
         const j = document.createElement('button'); j.className = 'bad'; j.textContent = 'Reject'; j.style.marginLeft = '6px'; j.onclick = () => decide(r.id, 'reject');
         act.append(a, j);
+      } else if (r.status === 'approved' && r.export_status !== 'recorded') {
+        const t = document.createElement('button'); t.className = 'ghost'; t.textContent = 'Retry export'; t.onclick = () => retry(r.id); act.append(t);
       }
       tr.append(st, act);
       rows.append(tr);
     }
+    const exp = await api('/api/admin/export');
+    document.getElementById('export').textContent = exp.lines.length ? exp.lines.join('\n') : '(empty)';
   } catch (e) { msg.textContent = e.message; }
 }
 

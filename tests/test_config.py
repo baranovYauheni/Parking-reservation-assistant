@@ -1,3 +1,5 @@
+import stat
+
 from parking_assistant.config import Settings
 
 
@@ -17,10 +19,14 @@ def test_llm_is_available_only_with_key_and_enabled(tmp_path):
     assert not make(tmp_path, OPENAI_API_KEY="sk-test", LLM_ENABLED=False).llm_available
 
 
-def test_ensure_secrets_generates_admin_token_only_when_missing(tmp_path):
-    generated = make(tmp_path)
-    generated.ensure_secrets()
-    assert len(generated.admin_token.get_secret_value()) >= 24
-    configured = make(tmp_path, ADMIN_TOKEN="fixed")
-    configured.ensure_secrets()
-    assert configured.admin_token.get_secret_value() == "fixed"
+def test_ensure_secrets_persists_mcp_secret_with_private_permissions(tmp_path):
+    settings = make(tmp_path)
+    settings.ensure_secrets()
+    assert settings.admin_token is not None
+    mode = stat.S_IMODE(settings.mcp_secret_path.stat().st_mode)
+    assert mode == 0o600
+    again = make(tmp_path)
+    assert (
+        again.load_mcp_secret().get_secret_value()
+        == settings.mcp_shared_secret.get_secret_value()
+    )

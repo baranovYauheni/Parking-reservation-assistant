@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import secrets
 from pathlib import Path
 from typing import Literal
@@ -23,6 +24,7 @@ class Settings(BaseSettings):
     )
 
     admin_token: SecretStr | None = Field(default=None, alias="ADMIN_TOKEN")
+    mcp_shared_secret: SecretStr | None = Field(default=None, alias="MCP_SHARED_SECRET")
 
     openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_MODEL")
@@ -51,9 +53,15 @@ class Settings(BaseSettings):
     retrieval_k: int = Field(default=3, alias="RETRIEVAL_K")
     retrieval_min_score: float | None = Field(default=None, alias="RETRIEVAL_MIN_SCORE")
 
+    mcp_timeout_seconds: float = Field(default=30.0, alias="MCP_TIMEOUT_SECONDS")
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "parking.db"
+
+    @property
+    def export_path(self) -> Path:
+        return self.data_dir / "exports" / "reservations.txt"
 
     @property
     def weaviate_data_path(self) -> Path:
@@ -69,10 +77,36 @@ class Settings(BaseSettings):
     def llm_available(self) -> bool:
         return self.llm_enabled and self.openai_api_key is not None
 
+    @property
+    def mcp_secret_path(self) -> Path:
+        return self.data_dir / ".mcp_secret"
+
     def ensure_secrets(self) -> None:
-        """Generate a process-local admin token when none is configured."""
+        """Generate secrets that are not configured.
+
+        The admin token is process-local. The MCP secret is persisted in the
+        data directory with mode 0600 so the MCP server process reads it from
+        trusted storage instead of trusting whoever spawns it.
+        """
         if self.admin_token is None:
             self.admin_token = SecretStr(secrets.token_urlsafe(24))
+        if self.mcp_shared_secret is None:
+            self.prepare_dirs()
+            path = self.mcp_secret_path
+            if not path.exists():
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as handle:
+                    handle.write(secrets.token_urlsafe(32))
+            self.mcp_shared_secret = SecretStr(path.read_text().strip())
+
+    def load_mcp_secret(self) -> SecretStr | None:
+        """Secret as seen by the MCP server: configured value or the stored file."""
+        if self.mcp_shared_secret is not None:
+            return self.mcp_shared_secret
+        if self.mcp_secret_path.exists():
+            return SecretStr(self.mcp_secret_path.read_text().strip())
+        return None
 
     def prepare_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.export_path.parent.mkdir(parents=True, exist_ok=True)

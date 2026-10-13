@@ -20,6 +20,7 @@ from parking_assistant.reservations import (
     ConflictError,
     NotFoundError,
     Reservation,
+    ReservationError,
     Status,
     describe_status,
 )
@@ -54,6 +55,7 @@ def public_view(r: Reservation) -> dict:
         "start": local_iso(r.start),
         "end": local_iso(r.end),
         "status": r.status.value,
+        "export_status": r.export_status.value,
         "status_text": describe_status(r),
         "notification": r.notification,
     }
@@ -255,5 +257,24 @@ def create_app(
         if outcome.error:
             raise HTTPException(409, outcome.error)
         return admin_view(outcome.reservation)
+
+    @app.post("/api/admin/requests/{reservation_id}/retry-export")
+    def admin_retry(reservation_id: str, c: ContainerDep, _: AdminDep) -> dict:
+        try:
+            r = c.workflow.retry_export(reservation_id)
+        except NotFoundError as exc:
+            raise HTTPException(404, "Request not found.") from exc
+        except ReservationError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return admin_view(r)
+
+    @app.get("/api/admin/export")
+    def admin_export(c: ContainerDep, _: AdminDep) -> dict:
+        path = c.settings.export_path
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        return {
+            "format": "Name | Car Number | Reservation Period | Approval Time",
+            "lines": lines,
+        }
 
     return app

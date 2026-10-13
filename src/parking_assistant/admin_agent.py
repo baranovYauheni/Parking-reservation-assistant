@@ -18,7 +18,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 
-from parking_assistant.reservations import ReservationService, Status
+from parking_assistant.reservations import ExportStatus, ReservationService, Status
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +80,13 @@ class OfflineAdminModel(BaseChatModel):
 
 
 def _describe(tool_result: str) -> str:
+    if "status=approved" in tool_result and "export=recorded" in tool_result:
+        return "Good news: your reservation was approved and recorded."
     if "status=approved" in tool_result:
-        return "Good news: your reservation was approved."
+        return (
+            "Your reservation was approved; recording in the register is still "
+            "in progress."
+        )
     if "status=rejected" in tool_result:
         return "Unfortunately the administrator rejected your reservation request."
     if "queued" in tool_result:
@@ -91,7 +96,7 @@ def _describe(tool_result: str) -> str:
 
 def _status_line(service: ReservationService, reservation_id: str) -> str:
     r = service.get(reservation_id)
-    return f"request={r.id[:8]} status={r.status.value}"
+    return f"request={r.id[:8]} status={r.status.value} export={r.export_status.value}"
 
 
 class AdminAgent:
@@ -158,13 +163,22 @@ class AdminAgent:
             "Look up its status and write a short message for the visitor."
         )
         reservation = self.service.get(reservation_id)
-        fallback = _describe(f"status={reservation.status.value}")
+        fallback = _describe(
+            f"status={reservation.status.value} export={reservation.export_status.value}"
+        )
         try:
             message = self._run([get_request_status], task)
         except Exception as exc:
             logger.warning("admin agent report failed: %s", exc)
             return fallback
+        # Never let the model claim success the data does not support.
+        recorded = (
+            reservation.status is Status.APPROVED
+            and reservation.export_status is ExportStatus.RECORDED
+        )
         lowered = message.lower()
+        if "recorded" in lowered and not recorded:
+            return fallback
         if reservation.status is Status.REJECTED and "approved" in lowered:
             return fallback
         return message or fallback

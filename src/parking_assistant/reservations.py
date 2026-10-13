@@ -363,7 +363,7 @@ class ReservationService:
 
             conn.execute(
                 "UPDATE reservations SET status = 'approved', decided_at = ?, "
-                "decided_by = ? "
+                "decided_by = ?, export_status = 'pending' "
                 "WHERE id = ? AND status = 'pending'",
                 (to_utc_text(now), admin, reservation_id),
             )
@@ -386,6 +386,14 @@ class ReservationService:
                     (to_utc_text(now), admin, reason[:200], reservation_id),
                 )
         return self.get(reservation_id)
+
+    def set_export_failed(self, reservation_id: str, error: str) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE reservations SET export_status = 'failed', export_error = ? "
+                "WHERE id = ? AND status = 'approved' AND export_status != 'recorded'",
+                (error[:300], reservation_id),
+            )
 
     def set_notification(self, reservation_id: str, text: str) -> None:
         with self.db.transaction() as conn:
@@ -434,4 +442,8 @@ def describe_status(r: Reservation) -> str:
     if r.status is Status.REJECTED:
         reason = f" ({r.decision_reason})" if r.decision_reason else ""
         return f"rejected by the administrator{reason}"
-    return "approved - your reservation is confirmed"
+    if r.export_status is ExportStatus.RECORDED:
+        return "approved and recorded - your reservation is confirmed"
+    if r.export_status is ExportStatus.FAILED:
+        return "approved, but recording failed - it will be retried; not final yet"
+    return "approved, recording in progress - not final yet"

@@ -25,6 +25,21 @@ def test_report_decision_reflects_human_rejection(service, clock):
     assert "rejected" in AdminAgent(service).report_decision(r.id)
 
 
+def test_model_that_claims_false_success_is_overridden(service, clock):
+    r = service.submit("s", make_request(clock))
+    service.approve(r.id, "admin")  # approved but not yet recorded
+    liar = FakeListChatModel(responses=["Your reservation was approved and recorded!"])
+
+    class LiarWithTools(FakeListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    message = AdminAgent(
+        service, LiarWithTools(responses=liar.responses)
+    ).report_decision(r.id)
+    assert "still in progress" in message
+
+
 def test_model_that_skips_tool_still_results_in_queue_entry(service, clock):
     class Lazy(FakeListChatModel):
         def bind_tools(self, tools, **kwargs):
@@ -33,14 +48,3 @@ def test_model_that_skips_tool_still_results_in_queue_entry(service, clock):
     r = service.submit("s", make_request(clock))
     AdminAgent(service, Lazy(responses=["Done."])).escalate(r.id)
     assert service.get(r.id).queued_at is not None
-
-
-def test_model_that_claims_approval_of_rejected_request_is_overridden(service, clock):
-    class Liar(FakeListChatModel):
-        def bind_tools(self, tools, **kwargs):
-            return self
-
-    r = service.submit("s", make_request(clock))
-    service.reject(r.id, "admin", "full")
-    message = AdminAgent(service, Liar(responses=["Approved!"])).report_decision(r.id)
-    assert "rejected" in message

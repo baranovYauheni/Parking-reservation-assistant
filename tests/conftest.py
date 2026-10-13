@@ -9,6 +9,8 @@ from parking_assistant.config import Settings
 from parking_assistant.container import build_container
 from parking_assistant.db import Database
 from parking_assistant.embeddings import HashingEmbeddings
+from parking_assistant.mcp_client import RecordResult
+from parking_assistant.mcp_server import record_reservation_core
 from parking_assistant.reservations import ReservationRequest, ReservationService
 from parking_assistant.vectorstore import MemoryIndex
 
@@ -24,6 +26,25 @@ class FakeClock:
 
     def advance(self, **kwargs) -> None:
         self.now += timedelta(**kwargs)
+
+
+class InProcessRecorder:
+    """Calls the MCP tool implementation directly (no subprocess)."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.calls: list[str] = []
+        self.fail = False
+
+    def record(self, reservation_id: str) -> RecordResult:
+        self.calls.append(reservation_id)
+        if self.fail:
+            return RecordResult(False, "MCP server unavailable: simulated")
+        try:
+            record_reservation_core(self.settings, reservation_id)
+        except Exception as exc:
+            return RecordResult(False, str(exc))
+        return RecordResult(True, "recorded")
 
 
 @pytest.fixture
@@ -77,11 +98,17 @@ def make_request(
 
 
 @pytest.fixture
-def container(settings: Settings, clock: FakeClock):
+def recorder(settings: Settings) -> InProcessRecorder:
+    return InProcessRecorder(settings)
+
+
+@pytest.fixture
+def container(settings: Settings, clock: FakeClock, recorder: InProcessRecorder):
     built = build_container(
         settings,
         clock=clock,
         index=MemoryIndex(HashingEmbeddings()),
+        recorder=recorder,
         use_configured_llm=False,
     )
     yield built

@@ -10,12 +10,13 @@ ADMIN = {"Authorization": "Bearer test-admin-token"}
 
 
 @pytest.fixture
-def client(settings, clock):
+def client(settings, clock, recorder):
     def factory(s):
         return build_container(
             s,
             clock=clock,
             index=MemoryIndex(HashingEmbeddings()),
+            recorder=recorder,
             use_configured_llm=False,
         )
 
@@ -54,14 +55,14 @@ def test_admin_endpoints_require_valid_token(client):
     assert client.get("/api/admin/requests", headers=ADMIN).status_code == 200
 
 
-def test_other_session_cannot_see_request(client):
+def test_other_session_cannot_see_request(client, settings, clock, recorder):
     rid = book(client)
     other = TestClient(client.app)
     assert other.get(f"/api/my-requests/{rid}").status_code == 404
     assert other.get("/api/my-requests").json()["requests"] == []
 
 
-def test_approve_flow_updates_user_status(client):
+def test_approve_flow_writes_export_and_updates_user_status(client):
     rid = book(client)
     pending = client.get("/api/admin/requests?status=pending", headers=ADMIN).json()[
         "requests"
@@ -71,9 +72,13 @@ def test_approve_flow_updates_user_status(client):
         f"/api/admin/requests/{rid}/decision", json={"action": "approve"}, headers=ADMIN
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "approved"
+    assert response.json()["export_status"] == "recorded"
+    export = client.get("/api/admin/export", headers=ADMIN).json()["lines"]
+    assert export == [
+        "John Smith | AB123CD | 2026-10-20T10:00:00+04:00/2026-10-20T12:00:00+04:00 | 2026-10-13T12:00:00+04:00"
+    ]
     mine = client.get(f"/api/my-requests/{rid}").json()
-    assert mine["status_text"].startswith("approved")
+    assert mine["status_text"].startswith("approved and recorded")
 
 
 def test_reject_then_approve_conflicts(client):
@@ -94,6 +99,7 @@ def test_reject_then_approve_conflicts(client):
         ).status_code
         == 409
     )
+    assert client.get("/api/admin/export", headers=ADMIN).json()["lines"] == []
 
 
 def test_availability_endpoint_validates_period(client):

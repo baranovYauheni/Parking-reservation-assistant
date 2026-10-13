@@ -1,6 +1,6 @@
 # Parking Reservation Assistant
 
-A chatbot for a fictional parking garage (**Demo Central Parking**: 10 interchangeable spaces, open 24/7, GEL 5 per started hour, timezone `Asia/Tbilisi`). It answers questions with **RAG** (Weaviate + LangChain), reads live prices, hours and availability from **SQL**, collects reservation details in a multi-turn dialog with **guardrails** against prompt injection and data leaks, and escalates each confirmed request to a **human administrator** through a second LangChain agent and an authenticated REST API.
+A chatbot for a fictional parking garage (**Demo Central Parking**: 10 interchangeable spaces, open 24/7, GEL 5 per started hour, timezone `Asia/Tbilisi`). It answers questions with **RAG** (Weaviate + LangChain), reads live prices, hours and availability from **SQL**, collects reservation details in a multi-turn dialog with **guardrails** against prompt injection and data leaks, escalates each confirmed request to a **human administrator** through a second LangChain agent and an authenticated REST API, and records approved reservations to a file through an **MCP server**.
 
 All data is synthetic.
 
@@ -10,7 +10,7 @@ All data is synthetic.
 | --- | --- | --- | --- |
 | 1 | RAG chatbot, Weaviate vector DB, SQL dynamic data, reservation dialog, guardrails, evaluation | `stage-1` | done |
 | 2 | Second LangChain agent, human-in-the-loop approval via admin REST API | `stage-2` | done |
-| 3 | MCP server records approved reservations (`Name \| Car Number \| Reservation Period \| Approval Time`) | `stage-3` | next |
+| 3 | MCP server records approved reservations (`Name \| Car Number \| Reservation Period \| Approval Time`) | `stage-3` | done |
 | 4 | LangGraph orchestration of the full pipeline, integration and load tests | `stage-4` | next |
 
 ## Architecture
@@ -31,6 +31,9 @@ flowchart LR
   AG -->|tools: enqueue, read status| SQL
   API -->|human decision| WF
   WF -->|approve/reject in one transaction| SQL
+  WF -->|record_reservation| MC[MCP client] -->|stdio| MS[MCP server]
+  MS -->|trusted read| SQL
+  MS -->|atomic snapshot| F[(var/exports/reservations.txt)]
 ```
 
 ### How it works
@@ -39,7 +42,14 @@ flowchart LR
 2. **Booking.** "I want to book" starts a slot-filling dialog (first name, last name, car number, start, end). Fields can be given one by one or together (`name: John Smith, car: AB123CD`, `from 2026-10-20 10:00 to 2026-10-20 12:00`), are kept between turns, can be edited (`edit car number`) and are validated. A summary with price and availability is shown before `confirm`.
 3. **Escalation.** On `confirm` a `pending` request is stored and the admin agent calls its `enqueue_for_human_review` tool. Pending requests do not hold a space.
 4. **Human decision.** The administrator approves or rejects in `/admin` (or via the REST API). Approval re-checks the rules and allocates capacity in one `BEGIN IMMEDIATE` SQLite transaction (peak occupancy over half-open intervals). The LLM has no tool that can approve.
-5. **Notification.** The admin agent reads the status through a tool and writes the visitor message.
+5. **Recording.** The MCP tool `record_reservation(reservation_id, auth_token)` verifies the secret, re-reads the reservation from SQL, refuses anything not approved, rewrites the export file atomically and marks it recorded. If recording fails, the request stays *approved - recording failed* and can be retried; the visitor sees "confirmed" only after recording succeeded.
+6. **Notification.** The admin agent reads the status through a tool and writes the visitor message.
+
+Export format (one line per approved reservation, ISO 8601 with offsets):
+
+```text
+John Smith | AB123CD | 2026-10-20T10:00:00+04:00/2026-10-20T12:00:00+04:00 | 2026-10-13T12:00:00+04:00
+```
 
 ## Setup
 
@@ -75,7 +85,8 @@ docker compose up --build
 | `WEAVIATE_MODE` | `embedded` | `embedded` (no Docker needed) or `local` (server at `WEAVIATE_HOST:WEAVIATE_PORT`) |
 | `EMBEDDINGS_PROVIDER` | `fastembed` | `fastembed` or `hashing` (offline, word overlap only) |
 | `RETRIEVAL_K`, `RETRIEVAL_MIN_SCORE` | 3, 0.45 (fastembed) / 0.1 (hashing) | top-K and minimum cosine similarity |
-| `PARKING_DATA_DIR` | `./var` | runtime data (SQLite, Weaviate data) |
+| `PARKING_DATA_DIR` | `./var` | runtime data (SQLite, export file, Weaviate data, MCP secret) |
+| `MCP_SHARED_SECRET` | generated into `var/.mcp_secret` | secret the MCP server requires |
 
 ## Usage
 
@@ -100,7 +111,11 @@ TOKEN=...  # ADMIN_TOKEN
 curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8000/api/admin/requests?status=pending"
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
      -d '{"action":"approve"}' http://127.0.0.1:8000/api/admin/requests/<id>/decision
+curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/api/admin/requests/<id>/retry-export
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/api/admin/export
 ```
+
+MCP server on its own (e.g. for MCP Inspector): `uv run python -m parking_assistant.mcp_server` (reads `var/parking.db` and `var/.mcp_secret`).
 
 ## Tests and quality
 
@@ -111,7 +126,7 @@ uv run ruff check src tests scripts
 uv run ruff format --check src tests scripts
 ```
 
-Every functional module has at least two tests. CI (`.github/workflows/ci.yml`) runs lint, tests, Weaviate integration tests and a Docker build.
+Every functional module has at least two tests including real MCP stdio round-trips. CI (`.github/workflows/ci.yml`) runs lint, tests, Weaviate integration tests and a Docker build.
 
 ## Evaluation
 
@@ -137,6 +152,9 @@ src/parking_assistant/
   guardrails.py                   input screening, output redaction
   reservations.py                 domain model, validation, transactional approve/reject
   availability.py                 half-open intervals and peak occupancy
+  mcp_server.py                   MCP server: record_reservation tool
+  mcp_client.py                   MCP stdio client
+  export.py                       export line format and atomic snapshot writer
   db.py, config.py, timeutils.py  storage, settings, time zones
   container.py, llm.py            wiring, chat model factory
   car_number.py, facility.py      car number normalization, facility defaults
@@ -154,6 +172,7 @@ docs/                evaluation reports
 * Visitors are identified by a random HttpOnly, SameSite=Strict cookie; every reservation query is scoped to the session (another session gets 404).
 * Input guardrails block prompt injection and private-data requests; model output is redacted. Retrieved documents are treated as data, not instructions. Pattern filters are a defence layer, not a guarantee.
 * Admin endpoints require a bearer token (constant-time comparison). The admin agent can only enqueue and read the status of the one request it was given, has no approve/reject tool and never sees names or car numbers.
+* The MCP tool takes only an id and a secret; approval state, data and output path are read server-side. Writes are atomic (`os.replace`) and serialized with a file lock.
 
 ## Limitations
 
